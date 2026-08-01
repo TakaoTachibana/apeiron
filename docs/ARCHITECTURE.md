@@ -112,7 +112,7 @@ graph LR
     subgraph MicroDynamical ["1. ミクロ力学系 (Micro State Trajectory)"]
         direction TB
         X["状態ベクトル x(t)<br/>(言説空間における軌跡)"]
-        ODE["微分方程式<br/>dx/dt = f(x) + M · g(x) + ξ(t)"]
+        ODE["微分方程式<br/>dx/dt = f(x) + M * g(x) + ξ(t)"]
         X --> ODE -->|時間発展| X
     end
 
@@ -129,7 +129,7 @@ graph LR
 
     %% Interactions
     MicroDynamical -->|時系列データ供給| MetaDynamical
-    MetaDynamical -->|方程式 f(x) の動的再構築| MicroDynamical
+    MetaDynamical -->|"方程式 f(x) の動的再構築"| MicroDynamical
     MicroDynamical -.->|引き戻し制御| TransitionBoundary
     MetaDynamical -.->|解の自己固着を無効化| TransitionBoundary
 
