@@ -11,22 +11,22 @@ graph TB
     end
 
     subgraph Kernel ["🐧 Linux OS Core / Memory Layer"]
-        SHM["<b>Linux System V Shared Memory</b><br/><i>('The Cytoplasm' Ring Buffer)</i>"]
+        SHM["Linux System V Shared Memory<br/>('The Cytoplasm' Ring Buffer)"]
     end
 
     subgraph Microservices ["⚡ Polyglot Microservices Layer"]
-        ING["<b>src/ingestion</b><br/>(Go)<br/>- Goroutine Stream Consumer<br/>- sys/unix Zero-Copy Write"]
-        R_WRK["<b>src/analytics-r</b><br/>(R 4.3+)<br/>- Takens Delay Embedding<br/>- TDA (ripsDiag / Persistence)"]
-        JUL_WRK["<b>src/compute-julia</b><br/>(Julia 1.10+)<br/>- SINDy (DataDrivenDiffEq.jl)<br/>- Dynamic AST Rewrite & JIT"]
+        ING["src/ingestion<br/>(Go)<br/>- Goroutine Stream Consumer<br/>- sys/unix Zero-Copy Write"]
+        R_WRK["src/analytics-r<br/>(R 4.3+)<br/>- Takens Delay Embedding<br/>- TDA (ripsDiag / Persistence)"]
+        JUL_WRK["src/compute-julia<br/>(Julia 1.10+)<br/>- SINDy (DataDrivenDiffEq.jl)<br/>- Dynamic AST Rewrite & JIT"]
     end
 
     subgraph Gateway ["🚪 Orchestration & Persistence Layer"]
-        CS_GW["<b>src/gateway</b><br/>(C# .NET 10 / Native AOT)<br/>- System.IO.Pipelines / Span&lt;T&gt;<br/>- WebSockets & FlatBuffers Router"]
-        MDB[("<b>infra/mariadb</b><br/>(MariaDB 11)<br/>- Attractors / AST History<br/>- Topological Conjugacies")]
+        CS_GW["src/gateway<br/>(C# .NET 10 / Native AOT)<br/>- System.IO.Pipelines / Span&lt;T&gt;<br/>- WebSockets & FlatBuffers Router"]
+        MDB[("infra/mariadb<br/>(MariaDB 11)<br/>- Attractors / AST History<br/>- Topological Conjugacies")]
     end
 
     subgraph Client ["💻 WebGPU Presentation Layer"]
-        FE["<b>src/web</b><br/>(React 19 + TS + Rspack)<br/>- Three.js 3D Phase-Space Attractors<br/>- WebGPU Compute Shader Lasso Query<br/>- KaTeX Formula Overlay"]
+        FE["src/web<br/>(React 19 + TS + Rspack)<br/>- Three.js 3D Phase-Space Attractors<br/>- WebGPU Compute Shader Lasso Query<br/>- KaTeX Formula Overlay"]
     end
 
     %% Flow Connections
@@ -111,18 +111,18 @@ sequenceDiagram
 graph LR
     subgraph MicroDynamical ["1. ミクロ力学系 (Micro State Trajectory)"]
         direction TB
-        X["状態ベクトル <b>x(t)</b><br/>(言説空間における軌跡)"]
-        ODE["微分方程式<br/><b>dx/dt = f(x) + M * g(x) + xi(t)</b>"]
+        X["状態ベクトル x(t)<br/>(言説空間における軌跡)"]
+        ODE["微分方程式<br/>dx/dt = f(x) + M · g(x) + ξ(t)"]
         X --> ODE -->|時間発展| X
     end
 
     subgraph TransitionBoundary ["2. 相転移境界 (Liminal Boundary)"]
-        LAMBDA["リアプノフ指数 <b>lambda ≈ 0</b><br/>(秩序とカオスの境界滞留)"]
+        LAMBDA["リアプノフ指数<br/>λ ≈ 0<br/>(秩序とカオスの境界滞留)"]
     end
 
     subgraph MetaDynamical ["3. メタ力学系 (Meta Structural Evolution)"]
         direction TB
-        TDA["TDA 位相データ解析<br/>(0次・1次永続ホモロジー)"]
+        TDA["TDA 位相データ解析<br/>(0次・1次永続ホモロジー β0, β1)"]
         AST["AST 構文木動的挿入<br/>(SymbolicUtils.jl JIT)"]
         TDA -->|破綻シグナル| AST
     end
@@ -183,8 +183,8 @@ erDiagram
         string id PK "UUID"
         text formula_latex "LaTeX 形式の方程式"
         longtext ast_json "Julia 構文木 (AST) JSON"
-        float r_squared "決定係数 R²"
-        float lyapunov_exponent "リアプノフ指数 λ"
+        float r_squared "決定係数 R2"
+        float lyapunov_exponent "リアプノフ指数 lambda"
         boolean is_liminal_stable "臨界面滞留フラグ"
         timestamp created_at "生成日時"
     }
