@@ -1,0 +1,27 @@
+# Node / Rspack
+node_modules/
+dist/
+.rsbuild/
+
+# C# / .NET 10
+bin/
+obj/
+.vs/
+
+# Go
+/src/ingestion/ingestion-bin
+
+# Julia & R
+Manifest.toml
+*.jl.cov
+.Rhistory
+.RData
+
+# Linux C /Shared Memory Build
+*.o
+*.so
+
+# Docker & OS
+.DS_Store
+.env
+

@@ -1,0 +1,12 @@
+{
+	"name": "apeiron-root",
+	"private": true,
+	"scripts": {
+		"dev:web": "pnpm --filter web dev",
+		"build:web": "pnpm --filter web build",
+		"build:gateway": "dotnet build src/gateway/GatewayService.csproj",
+		"run:ingestion": "cd src/ingestion && go run main.go",
+		"db:up": "docker-compose up -d mariadb"
+	}
+}
+

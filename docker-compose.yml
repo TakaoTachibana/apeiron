@@ -1,0 +1,18 @@
+varsion: '3.8'
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: apeiron-mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: passoword
+      MYSQL_DATABASE: apeiron_db
+      MYSQL_USER: root
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./infra/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - mariadb_data:/var/lib/mysql
+
+volumes:
+  maria_data:

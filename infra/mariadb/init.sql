@@ -1,0 +1,11 @@
+CREATE DATABASE IF NOT EXISTS apeiron_db;
+USE apeiron_db;
+
+CREATE TABLE IF NOT EXISTS attractors (
+	id VARCHAR(36) PRIMARY KEY,
+	formula_latex TEXT NOT NULL,
+	r_squared FLOAT NOT NULL,
+	is_stable BOOLEAN NOT NULL,
+	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
