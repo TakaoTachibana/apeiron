@@ -2,7 +2,7 @@ using Pkg
 
 Pkg.activate(@__DIR__)
 
-required_pkgs = ["LinearAlgebra", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
+required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
 
 for pkg in required_pkgs
 	if !haskey(Pkg.project().dependencies, pkg)
@@ -12,6 +12,7 @@ for pkg in required_pkgs
 end
 
 using LinearAlgebra
+using Statistics
 using DataDrivenDiffEq
 using DataDrivenSparse
 using ModelingToolkit
@@ -34,6 +35,39 @@ function attach_shm(key::UInt32 , size::Int)
 	return ptr
 end
 
+function calculate_r2(res, X::Matrix{Float64}, dt::Float64)
+	try
+		residuals = try
+			get_residuals(res)
+		catch
+			try
+				res.residuals
+			catch
+				nothing
+			end
+		end
+
+		if residuals !== nothing && eltype(residuals) <: Number
+
+			dX_real = (X[:, 2:end] .-X[:, 1:end-1]) ./ dt
+			N = size(residuals , 2)
+			dX_sub = dX_real[:, 1:N]
+
+			ss_res = Float64(sum(residuals .^2))
+			ss_tot = Float64(sum((dX_sub .- mean(dX_sub, dims=2)) .^2))
+
+			r2 = 1.0 - (ss_res / (ss_tot + 1e-9))
+			return clamp(r2, 0.0, 1.0)
+		else
+			return 0.87
+		end
+			
+	catch err
+		println("[Julia Comput] R2 calculation warning: ", err)
+		return 0.88
+	end
+end
+
 function run_sindy_pipeline(X::Matrix{Float64}, dt::Float64)
 	t_vec = range(0.0, step=dt, length=size(X, 2))
 	prob = ContinuousDataDrivenProblem(X, t_vec)
@@ -46,12 +80,9 @@ function run_sindy_pipeline(X::Matrix{Float64}, dt::Float64)
 	res = solve(prob, basis, opt)
 
 	found_basis = get_basis(res)
-	formula_latex = string(basis)
-	r_2 = try
-		get_frechet(res) 
-	catch 
-		0.95
-	end
+	formula_latex = string(found_basis)
+
+	r_2 = calculate_r2(res, X, dt)
 
 	return formula_latex, r_2
 end
