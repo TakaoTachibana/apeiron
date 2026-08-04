@@ -23,6 +23,9 @@ const SHM_SIZE = 128 * 1024 * 1024
 const DATA_OFFSET = 64 
 const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
 
+const FLAG_TDA_OFFSET = 32
+const FLAG_SINDY_OFFSET = 36
+
 function attach_shm(key::UInt32 , size::Int)
 	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
 	if shmid < 0
@@ -48,6 +51,16 @@ end
 	b3 = UInt32(safe_read_byte(shm_ptr, abs_pos + 2))
 	b4 = UInt32(safe_read_byte(shm_ptr, abs_pos + 3))
 	return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24)
+end
+
+function check_and_clear_tda_flag(shm_ptr::Ptr{UInt8})
+	flag_ptr = Ptr{UInt32}(shm_ptr + FLAG_TDA_OFFSET)
+	flag_val = unsafe_load(flag_ptr)
+	if flag_val == 1
+		unsafe_store!(flag_ptr, UInt32(0))
+		return true
+	end
+	return false
 end
 	
 function parse_jetstream_features(json_bytes::Vector{UInt8})
@@ -173,8 +186,9 @@ function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
 	return X_smooth
 end
 
-function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64)
-	X_smoothed = smooth_trajectory(X_raw, 20)
+function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64; is_disrupted::Bool=false)
+	smooth_win = is_disrupted ? 10 : 20
+	X_smoothed = smooth_trajectory(X_raw, smooth_win)
 
 	mu = mean(X_smoothed, dims=2)
 	sigma = std(X_smoothed, dims=2) .+ 1e-9
@@ -192,7 +206,8 @@ function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64)
 		poly_vec = polynomial_basis(x, 1)
 		basis = Basis(poly_vec, x)
 
-		opt = STLSQ(0.05)
+		threshold = is_disrupted ? 0.02 : 0.05
+		opt = STLSQ(threshold)
 		res = solve(prob, basis, opt)
 
 		found_basis = get_basis(res)
@@ -222,15 +237,21 @@ function main()
 	read_pos = UInt64(DATA_OFFSET)
 
 	while true
+		tda_disrupted = check_and_clear_tda_flag(shm_ptr)
 		X, current_write_idx, next_read_pos = read_trajectory_from_shm(shm_ptr, read_pos, 200)
 		read_pos = next_read_pos
 
 		if X !== nothing && current_write_idx > last_processed_idx
 			last_processed_idx = current_write_idx
 
-			latex_eq, score, mu, sigma = run_sindy_pipeline(X, 0.01)
+			if tda_disrupted
+				println("\n[Julia Compute] META-REWRITE TRIGGERED BY R (TDA DISRUPTION DETECTED!)")
+			end
+
+			latex_eq, score, mu, sigma = run_sindy_pipeline(X, 0.01, is_disrupted=tda_disrupted)
 			println("\n[SINDy Identified Differential Equation System]")
 			println("  Write Index: ", current_write_idx)
+			println("  Mode: ",tda_disrupted ? "RE-SINDY (META-REWRITE)" : "STANDARD")
 			println("  Data Mean mu: ", round.(vec(mu), digits=4))
 			println("  Data Std sigma: ", round.(vec(sigma), digits=4))
 			println("  Formula: ", latex_eq)

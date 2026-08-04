@@ -18,6 +18,9 @@ struct SharedMemoryHeader {
 	uint64_t write_index;
 	uint64_t read_index_r;
 	uint64_t read_index_j;
+	uint32_t flag_tda_disruption;
+	uint32_t flag_sindy_updated;
+	uint8_t _reserved[24];
 };
 
 const uint64_t DATA_OFFSET = 64;
@@ -60,6 +63,12 @@ Rcpp::List read_shm_header_cpp(SEXP xp) {
 		Rcpp::Named("write_index") = (double)header->write_index,
 		Rcpp::Named("read_index_r") = (double)header->read_index_r
 	);
+}
+
+// [[Rcpp::export]]
+void set_shm_disruption_flag_cpp(SEXP xp, int flag_value) {
+	Rcpp::XPtr<SharedMemoryHeader> header(xp);
+	header->flag_tda_disruption = static_cast<uint32_t>(flag_value);
 }
 
 // [[Rcpp::export]]
@@ -187,7 +196,13 @@ main <- function() {
 
 				cat(sprintf("\n[TDA Real-Time SHM Analysis | Write Index: %.0f]\n", current_write_idx))
 				cat(sprintf("  Max 1-Cycle Persistence (H1): %.4f\n", res$max_persistence))
-				cat(sprintf("  Topological Disruption Signal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewrite Triggered)", "STABLE")))
+
+				if (res$disruption) {
+					cat("  Topological Disruption Signal: CRITICAL (Meta-Rewrite Triggered -> Signaling Julia)\n")
+					set_shm_disruption_flag_cpp(shm_xp, 1)
+				} else {
+					cat(sprintf("  Topological Disruption Signal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewrite Triggered)", "STABLE")))
+				}
 			}
 
 			last_write_idx <- current_write_idx
