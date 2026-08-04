@@ -1,41 +1,97 @@
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
+using GatewayService.Data;
+using GatewayService.Models;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<AppDbContext>(options =>
+		options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
+
 builder.Services.AddOpenApi();
+builder.Services.AddCors(options => {
+		options.AddDefaultPolicy(policy =>
+				policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
+if (app.Environment.IsDevelopment()) {
+	app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+app.UseCors();
+app.UseWebSockets();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+var activeSockets = new List<WebSocket>();
+var socketLock = new object();
 
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+app.Use(async (context, next) => {
+	if (context.Request.Path == "/ws") {
+		if (context.WebSockets.IsWebSocketRequest) {
+			using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+			lock (socketLock) { activeSockets.Add(webSocket); }
+
+			app.Logger.LogInformation("[Gateway] New WebSocket client Connected.");
+
+			var buffer = new byte[1024 * 4];
+			while (webSocket.State == WebSocketState.Open) {
+			var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+			if (result.MessageType == WebSocketMessageType.Close) {
+				await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
+				}
+			}
+
+			lock (socketLock) { activeSockets.Remove(webSocket); }
+			app.Logger.LogInformation("[Gateway] WebSocket client disconnected.");
+		} else {
+			context.Response.StatusCode = StatusCodes.Status400BadRequest;
+		}
+	} else {
+		await next(context);
+	}
+});
+
+app.MapPost("/api/attractors", async (AttractorDto dto, AppDbContext db) => {
+	var entity = new Attractor {
+		FormulaLatex = dto.FormulaLatex,
+		RSquared = dto.RSquared,
+		IsStable = dto.RSquared >= 0.20f,
+		CreatedAt = DateTime.UtcNow
+	};
+
+	db.Attractors.Add(entity);
+	await db.SaveChangesAsync();
+
+	var payload = JsonSerializer.Serialize(new {
+		type = "ATTRACTOR_UPDATED",
+		data = entity
+	});
+	var bytes = Encoding.UTF8.GetBytes(payload);
+
+	List<WebSocket> targets;
+	lock (socketLock) { targets = activeSockets.Where(s => s.State == WebSocketState.Open).ToList(); }
+
+	foreach (var socket in targets) {
+		await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+	}
+
+	return Results.Created($"/api/attractors/{entity.Id}", entity);
+});
+
+app.MapGet("/api/attractors", async (AppDbContext db) => {
+	return await db.Attractors
+		.OrderByDescending(a => a.CreatedAt)
+		.Take(50)
+		.ToListAsync();
+});
 
 app.Run();
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+record AttractorDto(string FormulaLatex, float RSquared);
+
+
+
