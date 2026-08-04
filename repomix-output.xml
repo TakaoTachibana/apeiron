@@ -92,119 +92,6 @@ CREATE TABLE IF NOT EXISTS attractors (
 );
 </file>
 
-<file path="src/analytics-r/src/main.R">
-source("setup.R")
-
-library(Rcpp)
-library(TDA)
-library(jsonlite)
-
-sourceCpp(code = '
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <cstdint>
-#include <Rcpp.h>
-
-struct SharedMemoryHeader {
-	uint32_t magic;
-	uint32_t _pad;
-	uint64_t write_index;
-	uint64_t read_index_r;
-	uint64_t read_index_j;
-};
-
-// [[Rcpp::export]]
-SEXP attach_shm_cpp(int key, int size) {
-	int shmid = shmget((key_t)key, (size_t)size, 0);
-	if (shmid < 0) {
-		Rcpp::stop("[R Analytics] Failed to find System V Shared Memory. Is Go Ingestion running?");
-	}
-	void* ptr = shmat(shmid, NULL, 0);
-	if (ptr == (void*)-1) {
-		Rcpp::stop("[R analytics] Failed to attach Shared memory segment.");
-	}
-	SharedMemoryHeader* header_ptr = static_cast<SharedMemoryHeader*>(ptr);
-	return Rcpp::XPtr<SharedMemoryHeader>(header_ptr, false);
-}
-
-// [[Rcpp::export]]
-Rcpp::List read_shm_header_cpp(SEXP xp) {
-	Rcpp::XPtr<SharedMemoryHeader> ptr(xp);
-	SharedMemoryHeader* header = static_cast<SharedMemoryHeader*>(ptr.get());
-
-	return Rcpp::List::create(
-		Rcpp::Named("magic") = header->magic,
-		Rcpp::Named("write_index") = (double)header->write_index
-	);
-}
-')
-
-SHM_KEY <- 0x41504549
-SHM_SIZE <- 128 * 1024 * 1024
-
-run_tda_pipeline <- function(time_series, m = 3, tau = 1, maxscale = 2.0) {
-	embedded_matrix <- embed(time_series, dimension = m)
-
-	diag <- ripsDiag(
-		X = embedded_matrix,
-		maxdimension = 1,
-		maxscale = maxscale,
-		library = "GUDHI",
-		printProgress = FALSE
-	)
-
-	diagram <- diag$diagram
-
-	h1_features <- diagram[diagram[, "dimension"] == 1, , drop = FALSE]
-
-	disruption_flag <- FALSE
-	max_persistence <- 0.0
-
-	if (nrow(h1_features) > 0) {
-		persistence <- h1_features[, "Death"] - h1_features[, "Birth"]
-		max_persistence <- max(persistence)
-
-		if (max_persistence > 0.4) {
-			disruption_flag <- TRUE
-		}
-	}
-
-	return(list(
-		max_persistence = max_persistence,
-		disruption = disruption_flag
-	))
-}
-
-main <- function() {
-	cat("=== A P E I R O N // Analytics Engin (R) ===\n")
-
-	shm_xp <- attach_shm_cpp(SHM_KEY, SHM_SIZE)
-	header <- read_shm_header_cpp(shm_xp)
-
-	if (header$magic != SHM_KEY) {
-		stop("[R Analytics] Invalid Shard Memory Header Magic Byte!")
-	}
-
-	cat("[R Analytics] Attached Shared Memory (Magic: APEI)\n")
-	cat("[R Analytics] Polling state space for TDA Persistence Diagmam & Homology Disruptions...\n")
-
-	while (TRUE) {
-		t <- seq(0, 4 * pi, length.out = 100)
-		time_series <- sin(t) * rnorm(100, mean = 0, sd = 0.05)
-
-		res <- run_tda_pipeline(time_series)
-
-		cat(sprintf("\n[TDA Persistence Analysis]\n"))
-		cat(sprintf("  Max 1-Cycle Persistence (H1): %.4f\n", res$max_persistence))
-		cat(sprintf("  Topological Disruption Sinal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewirte Triggered)", "STABLE")))
-
-		Sys.sleep(5)
-	}
-}
-
-main()
-</file>
-
 <file path="src/analytics-r/src/setup.R">
 required_packages <- c("Rcpp", "TDA", "jsonlite")
 
@@ -597,130 +484,204 @@ volumes:
 }
 </file>
 
-<file path="src/compute-julia/src/main.jl">
-using Pkg
+<file path="src/analytics-r/src/main.R">
+source("setup.R")
 
-Pkg.activate(@__DIR__)
+library(Rcpp)
+library(TDA)
+library(jsonlite)
 
-required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
+sourceCpp(code = '
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <cstdint>
+#include <vector>
+#include <algorithm>
+#include <Rcpp.h>
 
-for pkg in required_pkgs
-	if !haskey(Pkg.project().dependencies, pkg)
-		println("[Julia Setup] Installing missing package: $pkg...")
-		Pkg.add(pkg)
-	end
-end
+struct SharedMemoryHeader {
+	uint32_t magic;
+	uint32_t _pad;
+	uint64_t write_index;
+	uint64_t read_index_r;
+	uint64_t read_index_j;
+};
 
-using LinearAlgebra
-using Statistics
-using DataDrivenDiffEq
-using DataDrivenSparse
-using ModelingToolkit
-using JSON3
+const uint64_t DATA_OFFSET = 64;
+const uint64_t SHM_SIZE = 128 * 1024 * 1024;
+const uint64_t RING_SIZE = SHM_SIZE - DATA_OFFSET;
 
-const SHM_KEY = 0x41504549
-const SHM_SIZE = 128 * 1024 * 1024
+inline uint8_t safe_read_byte(const char* shm_buf, uint64_t abs_pos) {
+	uint64_t rel_pos = abs_pos % RING_SIZE;
+	return static_cast<uint8_t>(shm_buf[DATA_OFFSET + rel_pos]);
+}
 
-function attach_shm(key::UInt32 , size::Int)
-	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
-	if shmid < 0
-		error("[Julia Comput] Failed to find System V Shared memory. Is Go Ingestion running?")
-	end
+inline uint32_t safe_read_uint32(const char* shm_buf, uint64_t abs_pos) {
+	uint32_t b1 = safe_read_byte(shm_buf, abs_pos);
+	uint32_t b2 = safe_read_byte(shm_buf, abs_pos + 1);
+	uint32_t b3 = safe_read_byte(shm_buf, abs_pos + 2);
+	uint32_t b4 = safe_read_byte(shm_buf, abs_pos + 3);
+	return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24);
+}
 
-	ptr = ccall(:shmat, Ptr{UInt8}, (Cint, Ptr{Cvoid}, Cint), shmid, C_NULL, 0)
-	if Ptr{Cint}(ptr) == Ptr{Cint}(-1)
-		error("[Julia Comput] Failed to attach shared memory segment.")
-	end
-	println("[Julia Comput] Attached Shared Memory ID: ", shmid)
-	return ptr
-end
 
-function calculate_r2(res, X::Matrix{Float64}, dt::Float64)
-	try
-		residuals = try
-			get_residuals(res)
-		catch
-			try
-				res.residuals
-			catch
-				nothing
-			end
-		end
+// [[Rcpp::export]]
+SEXP attach_shm_cpp(int key, int size) {
+	int shmid = shmget((key_t)key, (size_t)size, 0);
+	if (shmid < 0) {
+		Rcpp::stop("[R Analytics] Failed to find System V Shared Memory. Is Go Ingestion running?");
+	}
+	void* ptr = shmat(shmid, NULL, 0);
+	if (ptr == (void*)-1) {
+		Rcpp::stop("[R analytics] Failed to attach Shared memory segment.");
+	}
+	SharedMemoryHeader* header_ptr = static_cast<SharedMemoryHeader*>(ptr);
+	return Rcpp::XPtr<SharedMemoryHeader>(header_ptr, false);
+}
 
-		if residuals !== nothing && eltype(residuals) <: Number
+// [[Rcpp::export]]
+Rcpp::List read_shm_header_cpp(SEXP xp) {
+	Rcpp::XPtr<SharedMemoryHeader> header(xp);
+	return Rcpp::List::create(
+		Rcpp::Named("magic") = header->magic,
+		Rcpp::Named("write_index") = (double)header->write_index,
+		Rcpp::Named("read_index_r") = (double)header->read_index_r
+	);
+}
 
-			dX_real = (X[:, 2:end] .-X[:, 1:end-1]) ./ dt
-			N = size(residuals , 2)
-			dX_sub = dX_real[:, 1:N]
+// [[Rcpp::export]]
+Rcpp::List read_shm_timeseries_cpp(SEXP xp, int window_size) {
+	Rcpp::XPtr<SharedMemoryHeader> header(xp);
+	uint64_t write_idx = header->write_index;
+	uint64_t last_read_pos = header->read_index_r;
 
-			ss_res = Float64(sum(residuals .^2))
-			ss_tot = Float64(sum((dX_sub .- mean(dX_sub, dims=2)) .^2))
+	if (last_read_pos < DATA_OFFSET) {
+		last_read_pos = DATA_OFFSET;
+	}
 
-			r2 = 1.0 - (ss_res / (ss_tot + 1e-9))
-			return clamp(r2, 0.0, 1.0)
-		else
-			return 0.87
-		end
-			
-	catch err
-		println("[Julia Comput] R2 calculation warning: ", err)
-		return 0.88
-	end
-end
+	uint64_t curr_pos = last_read_pos;
+	if (write_idx > curr_pos + 1024 * 1024) {
+		curr_pos = write_idx - 1024 * 1024;
+	}
 
-function run_sindy_pipeline(X::Matrix{Float64}, dt::Float64)
-	t_vec = range(0.0, step=dt, length=size(X, 2))
-	prob = ContinuousDataDrivenProblem(X, t_vec)
+	const char* shm_buf = reinterpret_cast<const char*>(header.get());
+	std::vector<double> features;
+	features.reserve(1000);
 
-	@variables x[1:size(X, 1)]
-	poly_vec = polynomial_basis(x, 3)
-	basis = Basis(poly_vec, x)
+	while (curr_pos + 4 < write_idx && features.size() < 1000) {
+		uint32_t pkt_len = safe_read_uint32(shm_buf, curr_pos);
 
-	opt = STLSQ(1e-2)
-	res = solve(prob, basis, opt)
+		if (pkt_len > 0 && pkt_len < 65536 && (curr_pos + 4 + pkt_len <= write_idx)) {
+			features.push_back(static_cast<double>(pkt_len));
+			curr_pos += (4 + pkt_len);
+		} else {
+			curr_pos += 1;
+		}
+	}
 
-	found_basis = get_basis(res)
-	formula_latex = string(found_basis)
+	header->read_index_r = curr_pos;
 
-	r_2 = calculate_r2(res, X, dt)
+	if (features.size() < 20) {
+		return Rcpp::List::create(
+			Rcpp::Named("vec") = Rcpp::NumericVector(0),
+			Rcpp::Named("valid") = false
+		);
+	}
 
-	return formula_latex, r_2
-end
+	int N = std::min(static_cast<int>(features.size()), window_size);
+	Rcpp::NumericVector vec(N);
+	size_t start_feat = features.size() - N;
+	for (int i = 0; i < N; i++) {
+		vec[i] = features[start_feat + i];
+	}
 
-function main()
-	println("=== A P E I R O N // Compute Engine (Julia) ===")
+	return Rcpp::List::create(
+			Rcpp::Named("vec") = vec,
+			Rcpp::Named("valid") = true
+	);
+}
 
-	shm_ptr = attach_shm(SHM_KEY, SHM_SIZE)
+// [[Rcpp::export]]
+double get_shm_write_index_cpp(SEXP xp) {
+	Rcpp::XPtr<SharedMemoryHeader> header(xp);
+	return (double)header->write_index;
+}
+')
 
-	magic = unsafe_load(Ptr{UInt32}(shm_ptr))
-	if magic != SHM_KEY
-		error("[Julia Compute] Invalid Shared Memory Header Magic Byte: ", string(magic, base=16))
-	end
+SHM_KEY <- 0x41504549
+SHM_SIZE <- 128 * 1024 * 1024
 
-	println("[Julia Compute] System V IPC Connection Verified (Magic: APEI)")
-	println("[Julia Compute] Polling Shared Memory for State Space Trajectories...")
+run_tda_pipeline <- function(time_series, m = 3, tau = 2, maxscale = 2.5) {
+	std_val <- sd(time_series)
+	if (is.na(std_val) || std_val < 1e-6) {
+		return(list(max_persistence = 0.0, disruption = FALSE))
+	}
+	ts_scaled <- (time_series - mean(time_series)) / std_val
 
-	while true
-		t = range(0.0, step=0.01, length=200)
-		X = zeros(3, length(t))
-		for i in 1:length(t)
-			X[1, i] = sin(t[i])	* exp(-0.01 * t[i])
-			X[2, i] = cos(t[i]) * exp(-0.01 * t[i])
-			X[3, i] = sin(t[i]) * cos(t[i])
-		end
+	embedded_matrix <- embed(ts_scaled, dimension = m)
 
-		try
-			latex_eq, score = run_sindy_pipeline(X, 0.01)
-			println("\n[SINDy Identified Differential Equation System]")
-			println("  Formula: ", latex_eq)
-			println("  Fit Score (R^2): ", round(score, digits=4))
-		catch e
-			println("[Julia Comput] SINDy Solverinteration: ", e)
-		end
+	diag <- ripsDiag(
+		X = embedded_matrix,
+		maxdimension = 1,
+		maxscale = maxscale,
+		library = "GUDHI",
+		printProgress = FALSE
+	)
 
-		sleep(5.0)
-	end
-end
+	diagram <- diag$diagram
+	h1_features <- diagram[diagram[, "dimension"] == 1, , drop = FALSE]
+
+	disruption_flag <- FALSE
+	max_persistence <- 0.0
+
+	if (nrow(h1_features) > 0) {
+		persistence <- h1_features[, "Death"] - h1_features[, "Birth"]
+		max_persistence <- max(persistence)
+
+		if (max_persistence > 0.35) {
+			disruption_flag <- TRUE
+		}
+	}
+
+	return(list(
+		max_persistence = max_persistence,
+		disruption = disruption_flag
+	))
+}
+
+main <- function() {
+	cat("=== A P E I R O N // Analytics Engine (R) ===\n")
+
+	shm_xp <- attach_shm_cpp(SHM_KEY, SHM_SIZE)
+	header <- read_shm_header_cpp(shm_xp)
+
+	if (header$magic != SHM_KEY) {
+		stop("[R Analytics] Invalid Shard Memory Header Magic Byte!")
+	}
+
+	cat("[R Analytics] Attached Shared Memory (Magic: APEI)\n")
+	cat("[R Analytics] Direct Pointer Polling for TDA Persistence Diagrams...\n")
+
+	last_write_idx <- 0
+
+	while (TRUE) {
+		current_write_idx <- get_shm_write_index_cpp(shm_xp)
+		
+		if (current_write_idx > last_write_idx) {
+			res_data <- read_shm_timeseries_cpp(shm_xp, 100)
+			if (isTRUE(res_data$valid)) {
+				res <- run_tda_pipeline(res_data$vec)
+
+				cat(sprintf("\n[TDA Real-Time SHM Analysis | Write Index: %.0f]\n", current_write_idx))
+				cat(sprintf("  Max 1-Cycle Persistence (H1): %.4f\n", res$max_persistence))
+				cat(sprintf("  Topological Disruption Signal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewrite Triggered)", "STABLE")))
+			}
+
+			last_write_idx <- current_write_idx
+		}
+		Sys.sleep(2)
+	}
+}
 
 main()
 </file>
@@ -744,6 +705,257 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
+</file>
+
+<file path="src/compute-julia/src/main.jl">
+using Pkg
+
+Pkg.activate(@__DIR__)
+
+required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
+
+for pkg in required_pkgs
+	if !haskey(Pkg.project().dependencies, pkg)
+		println("[Julia Setup] Installing missing package: $pkg...")
+		Pkg.add(pkg)
+	end
+end
+
+using LinearAlgebra
+using Statistics
+using DataDrivenDiffEq
+using DataDrivenSparse
+using ModelingToolkit
+using JSON3
+
+const SHM_KEY = 0x41504549
+const SHM_SIZE = 128 * 1024 * 1024
+const DATA_OFFSET = 64 
+const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
+
+function attach_shm(key::UInt32 , size::Int)
+	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
+	if shmid < 0
+		error("[Julia Compute] Failed to find System V Shared memory. Is Go Ingestion running?")
+	end
+
+	ptr = ccall(:shmat, Ptr{UInt8}, (Cint, Ptr{Cvoid}, Cint), shmid, C_NULL, 0)
+	if Ptr{Cint}(ptr) == Ptr{Cint}(-1)
+		error("[Julia Compute] Failed to attach shared memory segment.")
+	end
+	println("[Julia Compute] Attached Shared Memory ID: ", shmid)
+	return ptr
+end
+
+@inline function safe_read_byte(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
+	rel_pos = abs_pos % RING_SIZE
+	return unsafe_load(shm_ptr + DATA_OFFSET + rel_pos)
+end
+
+@inline function safe_read_uint32(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
+	b1 = UInt32(safe_read_byte(shm_ptr, abs_pos))
+	b2 = UInt32(safe_read_byte(shm_ptr, abs_pos + 1))
+	b3 = UInt32(safe_read_byte(shm_ptr, abs_pos + 2))
+	b4 = UInt32(safe_read_byte(shm_ptr, abs_pos + 3))
+	return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24)
+end
+	
+function parse_jetstream_features(json_bytes::Vector{UInt8})
+	try
+		x1 = Float64(length(json_bytes))
+		x3 = Float64(sum(Int.(json_bytes[1:min(end, 50)])))
+
+		str = String(json_bytes)
+		x2 = Float64(count(c -> c == ':', str)) + 1.0
+
+		return [x1, x2, x3]
+	catch
+		return [100.0, 10.0, 5.0]
+	end
+end
+
+function read_trajectory_from_shm(shm_ptr::Ptr{UInt8}, last_read_pos::UInt64, window_size::Int=200)
+	write_idx = unsafe_load(Ptr{UInt64}(shm_ptr + 8))
+
+	if write_idx < DATA_OFFSET + 512
+		return nothing, write_idx, last_read_pos
+	end
+
+	start_pos = last_read_pos
+	if write_idx > start_pos + 1024 * 1024
+		start_pos = write_idx - 1024 * 1024
+	end
+
+	if start_pos < DATA_OFFSET
+		start_pos = DATA_OFFSET
+	end
+
+	collected_vecs = Vector{Vector{Float64}}()
+	curr_pos = start_pos
+
+	while curr_pos + 4 < write_idx
+		pkt_len = safe_read_uint32(shm_ptr, curr_pos)
+
+		if pkt_len > 0 && pkt_len < 65536 && (curr_pos + 4 + pkt_len <= write_idx)
+			bytes = zeros(UInt8, pkt_len)
+
+			for b in 1:pkt_len
+				bytes[b] = safe_read_byte(shm_ptr, curr_pos + 4 + (b - 1))
+			end
+
+			push!(collected_vecs, parse_jetstream_features(bytes))
+			curr_pos += (4 + pkt_len)
+		else
+			curr_pos += 1
+		end
+
+		if length(collected_vecs) >= 1000
+			break
+		end
+	end
+
+	if length(collected_vecs) < 10
+		return nothing, write_idx, curr_pos
+	end
+
+	selected = collected_vecs[max(1, end - window_size + 1):end]
+	N = length(selected)
+	X = zeros(Float64, 3, N)
+
+	for i in 1:N
+		X[:, i] = selected[i]
+	end
+
+	if var(X) < 1e-6
+		return nothing, write_idx, curr_pos
+	end
+
+	return X, write_idx, curr_pos
+end
+
+function calculate_r2(res, X::Matrix{Float64}, dt::Float64)
+	try
+		residuals = try
+			get_residuals(res)
+		catch
+			try
+				res.residuals
+			catch
+				nothing
+			end
+		end
+
+		residuals === nothing && return 0.0
+
+		dX_real = (X[:, 2:end] .-X[:, 1:end-1]) ./ dt
+		ss_tot = Float64(sum((dX_real .- mean(dX_real, dims=2)) .^2))
+
+		ss_res = 0.0
+
+		if residuals isa Number
+			ss_res = Float64(residuals)
+		elseif residuals isa AbstractArray && !isempty(residuals)
+			ss_res = Float64(sum(residuals .^ 2))
+		else 
+			return 0.0
+		end
+		
+		r2 = 1.0 - (ss_res / (ss_tot + 1e-9))
+		return clamp(r2, 0.0, 1.0)
+		
+	catch err
+		println("[Julia Comput] R2 calculation warning: ", err)
+		return 0.0
+	end
+end
+
+function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
+	X_smooth = zeros(size(X)) 
+	N = size(X, 2)
+	half_window = div(window, 2)
+	for i in 1:size(X, 1)
+		for j in 1:N
+			s_idx = max(1, j - half_window)
+			e_idx = min(N, j + half_window)
+			X_smooth[i, j] = mean(X[i, s_idx:e_idx])
+		end
+	end
+	return X_smooth
+end
+
+function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64)
+	X_smoothed = smooth_trajectory(X_raw, 20)
+
+	mu = mean(X_smoothed, dims=2)
+	sigma = std(X_smoothed, dims=2) .+ 1e-9
+	sigma_safe = [s < 1e-6 ? 1.0 : s for s in vec(sigma)]
+	X = (X_smoothed .- mu) ./ sigma_safe
+
+	dX = (X[:, 2:end] .- X[:, 1:end-1]) ./ dt
+	X_prob = X[:, 1:end-1]
+	t_prob = range(0.0, step=dt, length=size(X_prob, 2))
+
+	try
+		prob = ContinuousDataDrivenProblem(X_prob, t_prob, DX = dX)
+
+		@variables x[1:size(X, 1)]
+		poly_vec = polynomial_basis(x, 1)
+		basis = Basis(poly_vec, x)
+
+		opt = STLSQ(0.05)
+		res = solve(prob, basis, opt)
+
+		found_basis = get_basis(res)
+		formula_latex = string(found_basis)
+
+		r_2 = calculate_r2(res, X, dt)
+
+		return formula_latex, r_2, mu, sigma
+	catch err
+		return "dx/dt = 0 (Error: $(err))", 0.0, mu, sigma
+	end
+end
+
+function main()
+	println("=== A P E I R O N // Compute Engine (Julia) ===")
+
+	shm_ptr = attach_shm(SHM_KEY, SHM_SIZE)
+
+	magic = unsafe_load(Ptr{UInt32}(shm_ptr))
+	if magic != SHM_KEY
+		error("[Julia Compute] Invalid Shared Memory Header Magic Byte: ", string(magic, base=16))
+	end
+
+	println("[Julia Compute] System V IPC Direct Ring-Buffer Access Verified (Magic: APEI)")
+
+	last_processed_idx = UInt64(0)
+	read_pos = UInt64(DATA_OFFSET)
+
+	while true
+		X, current_write_idx, next_read_pos = read_trajectory_from_shm(shm_ptr, read_pos, 200)
+		read_pos = next_read_pos
+
+		if X !== nothing && current_write_idx > last_processed_idx
+			last_processed_idx = current_write_idx
+
+			latex_eq, score, mu, sigma = run_sindy_pipeline(X, 0.01)
+			println("\n[SINDy Identified Differential Equation System]")
+			println("  Write Index: ", current_write_idx)
+			println("  Data Mean mu: ", round.(vec(mu), digits=4))
+			println("  Data Std sigma: ", round.(vec(sigma), digits=4))
+			println("  Formula: ", latex_eq)
+			println("  Fit Score (R^2): ", round(score, digits=4))
+		else 
+			if X === nothing
+				println("[Julia Compute] Parsing Bluesky Jetstream JSON from SHM (Write Index: ", current_write_idx, ")...")
+			end
+		end
+
+		sleep(2.0)
+	end
+end
+
+main()
 </file>
 
 <file path="docs/ARCHITECTURE.md">
