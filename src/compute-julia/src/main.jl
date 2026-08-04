@@ -22,9 +22,7 @@ const SHM_KEY = 0x41504549
 const SHM_SIZE = 128 * 1024 * 1024
 const DATA_OFFSET = 64 
 const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
-
-const FLAG_TDA_OFFSET = 32
-const FLAG_SINDY_OFFSET = 36
+const GATEWAY_URL = "http://localhost:5236/api/attractors"
 
 function attach_shm(key::UInt32 , size::Int)
 	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
@@ -186,6 +184,18 @@ function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
 	return X_smooth
 end
 
+function post_attractor_to_gateway(latex_eq::String, socre::Float64)
+	try
+		payload = JSON3.write(Dict("FormulateLatex" => latex_eq, "RSquared" => Float32(score)))
+		resp = HTTP.post(GATEWAY_URL, ["Content-Type" => "application/json"], payload)
+		if resp.status == 201 || resp.status == 200
+			println("[Julia Compute] Successfully posted attractor formula to Gateway.")
+		end
+	catch err
+		println("[Julia Compute] Gateway post skipped or failed (Gateway running?): ", err)
+	end
+end
+
 function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64; is_disrupted::Bool=false)
 	smooth_win = is_disrupted ? 10 : 20
 	X_smoothed = smooth_trajectory(X_raw, smooth_win)
@@ -256,6 +266,8 @@ function main()
 			println("  Data Std sigma: ", round.(vec(sigma), digits=4))
 			println("  Formula: ", latex_eq)
 			println("  Fit Score (R^2): ", round(score, digits=4))
+
+			post_attractor_to_gateway(latex_eq, score)
 		else 
 			if X === nothing
 				println("[Julia Compute] Parsing Bluesky Jetstream JSON from SHM (Write Index: ", current_write_idx, ")...")
