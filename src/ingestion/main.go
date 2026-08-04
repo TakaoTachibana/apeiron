@@ -28,6 +28,9 @@ type SharedMemoryHeader struct {
 	WriteIndex uint64
 	ReadIndexR uint64
 	ReadIndexJ uint64
+	FlagTDADisruption uint32
+	FlagSINDyUpdated uint32
+	Rserved [24]byte
 }
 
 type IngestionWorker struct {
