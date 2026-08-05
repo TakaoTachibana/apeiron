@@ -1,6 +1,7 @@
 [deps]
 DataDrivenDiffEq = "2445eb08-9709-466a-b3fc-47e12bd697a2"
 DataDrivenSparse = "5b588203-7d8b-4fab-a537-c31a7f73f46b"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
