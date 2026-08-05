@@ -2,7 +2,7 @@ using Pkg
 
 Pkg.activate(@__DIR__)
 
-required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
+required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3", "HTTP"]
 
 for pkg in required_pkgs
 	if !haskey(Pkg.project().dependencies, pkg)
@@ -17,12 +17,16 @@ using DataDrivenDiffEq
 using DataDrivenSparse
 using ModelingToolkit
 using JSON3
+using HTTP
 
 const SHM_KEY = 0x41504549
 const SHM_SIZE = 128 * 1024 * 1024
 const DATA_OFFSET = 64 
 const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
 const GATEWAY_URL = "http://localhost:5236/api/attractors"
+
+const FLAG_TDA_OFFSET = 32
+const FLAG_SINDY_OFFSET = 36
 
 function attach_shm(key::UInt32 , size::Int)
 	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
@@ -184,9 +188,9 @@ function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
 	return X_smooth
 end
 
-function post_attractor_to_gateway(latex_eq::String, socre::Float64)
+function post_attractor_to_gateway(latex_eq::String, score::Float64)
 	try
-		payload = JSON3.write(Dict("FormulateLatex" => latex_eq, "RSquared" => Float32(score)))
+		payload = JSON3.write(Dict("FormulaLatex" => latex_eq, "RSquared" => Float32(score)))
 		resp = HTTP.post(GATEWAY_URL, ["Content-Type" => "application/json"], payload)
 		if resp.status == 201 || resp.status == 200
 			println("[Julia Compute] Successfully posted attractor formula to Gateway.")

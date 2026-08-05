@@ -9,7 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 builder.Services.AddDbContext<AppDbContext>(options =>
-		options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
+		options.UseMySql(connectionString, new MariaDbServerVersion(new Version(11, 0, 0))));
 
 builder.Services.AddOpenApi();
 builder.Services.AddCors(options => {
