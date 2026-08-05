@@ -56,6 +56,10 @@ src/
       Project.toml
   gateway/
     GatewayService/
+      Data/
+        AppDbContext.cs
+      Models/
+        Attractor.cs
       Properties/
         launchSettings.json
       appsettings.Development.json
@@ -68,6 +72,7 @@ src/
     main.go
   web/
     src/
+      App.tsx
       index.tsx
     package.json
     rsbuild.config.ts
@@ -78,19 +83,6 @@ package.json
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="infra/mariadb/init.sql">
-CREATE DATABASE IF NOT EXISTS apeiron_db;
-USE apeiron_db;
-
-CREATE TABLE IF NOT EXISTS attractors (
-	id VARCHAR(36) PRIMARY KEY,
-	formula_latex TEXT NOT NULL,
-	r_squared FLOAT NOT NULL,
-	is_stable BOOLEAN NOT NULL,
-	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-</file>
 
 <file path="src/analytics-r/src/setup.R">
 required_packages <- c("Rcpp", "TDA", "jsonlite")
@@ -103,6 +95,33 @@ for (pkg in required_packages) {
 }
 
 message("[R Setup] All dependencies (Rcpp, TDA, jsonlite) are ready!")
+</file>
+
+<file path="src/gateway/GatewayService/Models/Attractor.cs">
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace GatewayService.Models;
+
+[Table("attractors")]
+public class Attractor {
+	[Key]
+	[Column("id")]
+	public string Id { get; set; } = Guid.NewGuid().ToString();
+
+	[Required]
+	[Column("formula_latex")]
+	public string FormulaLatex { get; set; } = string.Empty;
+
+	[Column("r_squared")]
+	public float RSquared { get; set; }
+
+	[Column("is_stable")]
+	public bool IsStable { get; set; }
+
+	[Column("created_at")]
+	public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
 </file>
 
 <file path="src/gateway/GatewayService/Properties/launchSettings.json">
@@ -131,45 +150,6 @@ message("[R Setup] All dependencies (Rcpp, TDA, jsonlite) are ready!")
 }
 </file>
 
-<file path="src/gateway/GatewayService/appsettings.Development.json">
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
-  }
-}
-</file>
-
-<file path="src/gateway/GatewayService/appsettings.json">
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
-  },
-  "AllowedHosts": "*"
-}
-</file>
-
-<file path="src/gateway/GatewayService/GatewayService.csproj">
-<Project Sdk="Microsoft.NET.Sdk.Web">
-
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-  </ItemGroup>
-
-</Project>
-</file>
-
 <file path="src/gateway/GatewayService/GatewayService.http">
 @GatewayService_HostAddress = http://localhost:5236
 
@@ -179,48 +159,328 @@ Accept: application/json
 ###
 </file>
 
-<file path="src/gateway/GatewayService/Program.cs">
-var builder = WebApplication.CreateBuilder(args);
+<file path="src/web/src/App.tsx">
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
-
-var app = builder.Build();
-
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
+interface AttractorData {
+	id: string;
+	formulaLatex: string;
+	rSquared: number;
+	isStable: boolean;
+	createdAt: string;
 }
 
-app.UseHttpsRedirection();
+export const App: React.FC = () => {
+	const [attractor, setAttractor] = useState<AttractorData | null>(null);
+	const [isConnected, setIsConnected] = useState<boolean>(false);
+	const mountRef = useRef<HTMLDivElement>(null);
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
+	useEffect(() => {
+		const ws = new WebSocket('ws://localhost:5236/ws');
+
+		ws.onopen = () => {
+			console.log('[Web] Connected to C# Gateway WebSocket');
+			setIsConnected(true);
+		};
+
+		ws.onmessage = (event) => {
+			try {
+				const message = JSON.parse(event.data);
+				if (message.type === 'ATTRACTOR_UPDATED' && message.data)  {
+					setAttractor(message.data);
+				}
+			} catch (err) {
+				console.error('[Web] Failed to parse WebSocket message:', err);
+			}
+		};
+
+		ws.onclose = () => {
+			console.log('[Web] WebSocket disconnected');
+			setIsConnected(false);
+		};
+
+		return () => {
+			ws.close();
+		};
+	}, []);
+
+	useEffect(() => {
+		if (!mountRef.current) {
+			return;
+		}
+
+		const width = mountRef.current.clientWidth;
+		const height = mountRef.current.clientHeight;
+
+		const scene = new THREE.Scene();
+		scene.background = new THREE.Color(0x0a0a0f);
+
+		const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+		camera.position.z = 30;
+
+		const renderer = new THREE.WebGLRenderer({ antialias: true });
+		renderer.setSize(width, height);
+		mountRef.current.appendChild(renderer.domElement);
+
+		const particleCount = 2000;
+		const geometry = new THREE.BufferGeometry();
+		const position = new Float32Array(particleCount * 3);
+
+		for (let i = 0; i < particleCount * 3; i += 3) {
+			position[i] = (Math.random() - 0.5) * 40;
+			position[i + 1] = (Math.random() - 0.5) * 40;
+			position[i + 2] = (Math.random() - 0.5) * 40;
+		}
+
+		geometry.setAttribute('position', new THREE.BufferAttribute(position, 3));
+		const material = new THREE.PointsMaterial({
+			color: 0x6366f1,
+			size: 0.5,
+			transparent: true,
+			opacity: 0.8,
+		});
+
+		const particles = new THREE.Points(geometry, material);
+		scene.add(particles);
+
+		let animationFrameId: number;
+		const animate = () => {
+			animationFrameId = requestAnimationFrame(animate);
+			particles.rotation.x += 0.001;
+			particles.rotation.y += 0.002;
+			renderer.render(scene, camera);
+		};
+		animate();
+
+		const handleResize = () => {
+			if (!mountRef.current) {
+				return;
+			}
+			const w = mountRef.current.clinetWidth;
+			const h = mountRef.current.clientHeight;
+			camera.aspect = w / h;
+			camera.updateProjectionMatrix();
+			renderer.setSize(w, h);
+		};
+
+		window.addEventListener('resize', handleResize);
+
+		return () => {
+			cancelAnimatioonFrame(animationFrameId);
+			window.removeEventListener('resize', handleResize);
+			if (mountRef.current) {
+				mountRef.current.removeChild(renderer.domElement);
+			}
+		};
+	}, []);
+
+	return (
+		<div>
+			<div ref={mountRef} />
+			<div>
+				<div>
+					<h2>A P E I R O N</h2>
+					<span>
+						{isConnected ? 'LIVE WS' : 'DISCONNECTED'}
+					</span>
+				</div>
+
+				{attractor ? (
+					<div>
+						<div>
+						<div>
+							{attractor.formulaLatex}
+						</div>
+
+						<div>
+							<span>Fit Score (R^2):</span>
+							<strong>
+								{(attractor.rSquared * 100).toFixed(2)}%
+							</strong>
+						</div>
+
+						<div>
+							<span>State:</span>
+							<span>
+								{attractor.isStable ? 'LAMINAR / STABLE' : 'TURBULENT / LIMINAL'}
+							</span>
+						</div>
+					</div>
+				) : (
+					<div>
+						Waiting for live stream attractor calculation...
+					</div>
+				)}
+			</div>
+		</div>
+	);
 };
+</file>
 
-app.MapGet("/weatherforecast", () =>
+<file path="src/web/package.json">
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
-
-app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+	"name": "web",
+	"private": true,
+	"version": "1.0.0",
+	"scripts": {
+		"dev": "rsbuild dev",
+		"build": "rsbuild build",
+		"preview": "rsbuild preview"
+	},
+	"dependencies": {
+		"react": "^19.0.0",
+		"react-dom": "^19.0.0",
+		"three": "^0.170.0"
+	},
+	"devDependencies": {
+		"@rsbuild/core": "^1.0.0",
+		"@rsbuild/plugin-react": "^1.0.0",
+		"@types/react": "^19.0.0",
+		"@types/react-dom": "^19.0.0",
+		"@types/three": "^0.170.0",
+		"typescript": "^5.6.0"
+	}
 }
+</file>
+
+<file path="src/web/rsbuild.config.ts">
+import { defineConfig } from '@rsbuild/core';
+import { pluginReact } from '@rsbuild/plugin-react';
+
+export default defineConfig({
+	plygins: [pluginReact()],
+	html: {
+		title: 'Apeiron - Autopoietic Phase-Space Platform',
+	},
+});
+</file>
+
+<file path=".gitignore">
+# Node / Rspack
+node_modules/
+dist/
+.rsbuild/
+
+# C# / .NET 10
+bin/
+obj/
+.vs/
+
+# Go
+/src/ingestion/ingestion-bin
+
+# Julia & R
+Manifest.toml
+*.jl.cov
+.Rhistory
+.RData
+
+# Linux C /Shared Memory Build
+*.o
+*.so
+
+# Docker & OS
+.DS_Store
+.env
+</file>
+
+<file path="package.json">
+{
+	"name": "apeiron-root",
+	"private": true,
+	"scripts": {
+		"dev:web": "pnpm --filter web dev",
+		"build:web": "pnpm --filter web build",
+		"build:gateway": "dotnet build src/gateway/GatewayService.csproj",
+		"run:ingestion": "cd src/ingestion && go run main.go",
+		"db:up": "docker-compose up -d mariadb"
+	}
+}
+</file>
+
+<file path="infra/mariadb/init.sql">
+-- 1. データベースの作成
+CREATE DATABASE IF NOT EXISTS apeiron_db;
+USE apeiron_db;
+
+-- 2. テーブルの作成
+CREATE TABLE IF NOT EXISTS attractors (
+	id VARCHAR(36) PRIMARY KEY,
+	formula_latex TEXT NOT NULL,
+	r_squared FLOAT NOT NULL,
+	is_stable BOOLEAN NOT NULL,
+	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. root ユーザーの TCP パスワード認証設定 (localhost, 127.0.0.1, %)
+ALTER USER 'root'@'localhost' IDENTIFIED BY 'password';
+
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY 'password';
+CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY 'password';
+
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY 'password';
+ALTER USER 'root'@'%' IDENTIFIED BY 'password';
+
+-- 4. 全権限の付与
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+
+FLUSH PRIVILEGES;
+</file>
+
+<file path="src/gateway/GatewayService/Data/AppDbContext.cs">
+using GatewayService.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace GatewayService.Data;
+
+public class AppDbContext : DbContext {
+	public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+	public DbSet<Attractor> Attractors => Set<Attractor>();
+
+	protected override void OnModelCreating(ModelBuilder modelBuilder) {
+		base.OnModelCreating(modelBuilder);
+
+		modelBuilder.Entity<Attractor>(entity => {
+			entity.ToTable("attractors");
+
+			entity.Property(e => e.Id).HasColumnName("id");
+			entity.Property(e => e.FormulaLatex).HasColumnName("formula_latex");
+			entity.Property(e => e.RSquared).HasColumnName("r_squared");
+			entity.Property(e => e.IsStable).HasColumnName("is_stable");
+			entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+		});
+	}
+}
+</file>
+
+<file path="src/gateway/GatewayService/appsettings.Development.json">
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+	"AllowedHosts": "*",
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=127.0.0.1;Port=3306;Database=apeiron_db;User=root;Password=password;"
+  }
+}
+</file>
+
+<file path="src/ingestion/go.mod">
+module apeiron/ingestion
+
+go 1.26.5
+
+require (
+	golang.org/x/sys v0.47.0 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
+)
 </file>
 
 <file path="src/ingestion/main.go">
@@ -254,6 +514,9 @@ type SharedMemoryHeader struct {
 	WriteIndex uint64
 	ReadIndexR uint64
 	ReadIndexJ uint64
+	FlagTDADisruption uint32
+	FlagSINDyUpdated uint32
+	Rserved [24]byte
 }
 
 type IngestionWorker struct {
@@ -370,95 +633,25 @@ func main() {
 <file path="src/web/src/index.tsx">
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-
-const App = () => (
-	APEIRON // Phase-Space Canvas (Rspack + React 19)
-)
+import { App } from './App';
 
 const container = document.getElementById('root');
 if (container) {
 	const root = createRoot(container);
-	root.render();
+	root.render(<App />);
 }
-</file>
-
-<file path="src/web/package.json">
-{
-	"name": "web",
-	"private": true,
-	"version": "1.0.0",
-	"scripts": {
-		"dev": "rsbuild dev",
-		"build": "rsbuild build",
-		"preview": "rsbuild preview"
-	},
-	"dependencies": {
-		"react": "^19.0.0",
-		"react-dom": "^19.0.0",
-		"three": "^0.170.0"
-	},
-	"devDependencies": {
-		"@rsbuild/core": "^1.0.0",
-		"@rsbuild/plugin-react": "^1.0.0",
-		"@types/react": "^19.0.0",
-		"@types/react-dom": "^19.0.0",
-		"@types/three": "^0.170.0",
-		"typescript": "^5.6.0"
-	}
-}
-</file>
-
-<file path="src/web/rsbuild.config.ts">
-import { defineConfig } from '@rsbuild/core';
-import { pluginReact } from '@rsbuild/plugin-react';
-
-export default defineConfig({
-	plygins: [pluginReact()],
-	html: {
-		title: 'Apeiron - Autopoietic Phase-Space Platform',
-	},
-});
-</file>
-
-<file path=".gitignore">
-# Node / Rspack
-node_modules/
-dist/
-.rsbuild/
-
-# C# / .NET 10
-bin/
-obj/
-.vs/
-
-# Go
-/src/ingestion/ingestion-bin
-
-# Julia & R
-Manifest.toml
-*.jl.cov
-.Rhistory
-.RData
-
-# Linux C /Shared Memory Build
-*.o
-*.so
-
-# Docker & OS
-.DS_Store
-.env
 </file>
 
 <file path="docker-compose.yml">
-varsion: '3.8'
+version: '3.8'
 services:
   mariadb:
     image: mariadb:11
     container_name: apeiron-mariadb
     environment:
-      MYSQL_ROOT_PASSWORD: passoword
+      MYSQL_ROOT_PASSWORD: password
       MYSQL_DATABASE: apeiron_db
-      MYSQL_USER: root
+      MYSQL_USER: apeiron_user
       MYSQL_PASSWORD: password
     ports:
       - "3306:3306"
@@ -467,21 +660,7 @@ services:
       - mariadb_data:/var/lib/mysql
 
 volumes:
-  maria_data:
-</file>
-
-<file path="package.json">
-{
-	"name": "apeiron-root",
-	"private": true,
-	"scripts": {
-		"dev:web": "pnpm --filter web dev",
-		"build:web": "pnpm --filter web build",
-		"build:gateway": "dotnet build src/gateway/GatewayService.csproj",
-		"run:ingestion": "cd src/ingestion && go run main.go",
-		"db:up": "docker-compose up -d mariadb"
-	}
-}
+  mariadb_data:
 </file>
 
 <file path="src/analytics-r/src/main.R">
@@ -505,6 +684,9 @@ struct SharedMemoryHeader {
 	uint64_t write_index;
 	uint64_t read_index_r;
 	uint64_t read_index_j;
+	uint32_t flag_tda_disruption;
+	uint32_t flag_sindy_updated;
+	uint8_t _reserved[24];
 };
 
 const uint64_t DATA_OFFSET = 64;
@@ -547,6 +729,12 @@ Rcpp::List read_shm_header_cpp(SEXP xp) {
 		Rcpp::Named("write_index") = (double)header->write_index,
 		Rcpp::Named("read_index_r") = (double)header->read_index_r
 	);
+}
+
+// [[Rcpp::export]]
+void set_shm_disruption_flag_cpp(SEXP xp, int flag_value) {
+	Rcpp::XPtr<SharedMemoryHeader> header(xp);
+	header->flag_tda_disruption = static_cast<uint32_t>(flag_value);
 }
 
 // [[Rcpp::export]]
@@ -674,7 +862,13 @@ main <- function() {
 
 				cat(sprintf("\n[TDA Real-Time SHM Analysis | Write Index: %.0f]\n", current_write_idx))
 				cat(sprintf("  Max 1-Cycle Persistence (H1): %.4f\n", res$max_persistence))
-				cat(sprintf("  Topological Disruption Signal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewrite Triggered)", "STABLE")))
+
+				if (res$disruption) {
+					cat("  Topological Disruption Signal: CRITICAL (Meta-Rewrite Triggered -> Signaling Julia)\n")
+					set_shm_disruption_flag_cpp(shm_xp, 1)
+				} else {
+					cat(sprintf("  Topological Disruption Signal: %s\n", ifelse(res$disruption, "CRITICAL (Meta-Rewrite Triggered)", "STABLE")))
+				}
 			}
 
 			last_write_idx <- current_write_idx
@@ -690,272 +884,144 @@ main()
 [deps]
 DataDrivenDiffEq = "2445eb08-9709-466a-b3fc-47e12bd697a2"
 DataDrivenSparse = "5b588203-7d8b-4fab-a537-c31a7f73f46b"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 </file>
 
-<file path="src/ingestion/go.mod">
-module apeiron/ingestion
-
-go 1.26.5
-
-require (
-	golang.org/x/sys v0.47.0 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
-)
+<file path="src/gateway/GatewayService/appsettings.json">
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=127.0.0.1;Port=3306;Database=apeiron_db;User=root;Password=password;"
+  }
+}
 </file>
 
-<file path="src/compute-julia/src/main.jl">
-using Pkg
+<file path="src/gateway/GatewayService/GatewayService.csproj">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
-Pkg.activate(@__DIR__)
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
 
-required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3"]
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.0-preview.2.efcore.8.0.0" />
+  </ItemGroup>
 
-for pkg in required_pkgs
-	if !haskey(Pkg.project().dependencies, pkg)
-		println("[Julia Setup] Installing missing package: $pkg...")
-		Pkg.add(pkg)
-	end
-end
+</Project>
+</file>
 
-using LinearAlgebra
-using Statistics
-using DataDrivenDiffEq
-using DataDrivenSparse
-using ModelingToolkit
-using JSON3
+<file path="src/gateway/GatewayService/Program.cs">
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
+using GatewayService.Data;
+using GatewayService.Models;
+using Microsoft.EntityFrameworkCore;
 
-const SHM_KEY = 0x41504549
-const SHM_SIZE = 128 * 1024 * 1024
-const DATA_OFFSET = 64 
-const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
+var builder = WebApplication.CreateBuilder(args);
 
-function attach_shm(key::UInt32 , size::Int)
-	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
-	if shmid < 0
-		error("[Julia Compute] Failed to find System V Shared memory. Is Go Ingestion running?")
-	end
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<AppDbContext>(options =>
+		options.UseMySql(connectionString, new MariaDbServerVersion(new Version(11, 0, 0))));
 
-	ptr = ccall(:shmat, Ptr{UInt8}, (Cint, Ptr{Cvoid}, Cint), shmid, C_NULL, 0)
-	if Ptr{Cint}(ptr) == Ptr{Cint}(-1)
-		error("[Julia Compute] Failed to attach shared memory segment.")
-	end
-	println("[Julia Compute] Attached Shared Memory ID: ", shmid)
-	return ptr
-end
+builder.Services.AddOpenApi();
+builder.Services.AddCors(options => {
+		options.AddDefaultPolicy(policy =>
+				policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
 
-@inline function safe_read_byte(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
-	rel_pos = abs_pos % RING_SIZE
-	return unsafe_load(shm_ptr + DATA_OFFSET + rel_pos)
-end
+var app = builder.Build();
 
-@inline function safe_read_uint32(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
-	b1 = UInt32(safe_read_byte(shm_ptr, abs_pos))
-	b2 = UInt32(safe_read_byte(shm_ptr, abs_pos + 1))
-	b3 = UInt32(safe_read_byte(shm_ptr, abs_pos + 2))
-	b4 = UInt32(safe_read_byte(shm_ptr, abs_pos + 3))
-	return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24)
-end
-	
-function parse_jetstream_features(json_bytes::Vector{UInt8})
-	try
-		x1 = Float64(length(json_bytes))
-		x3 = Float64(sum(Int.(json_bytes[1:min(end, 50)])))
+if (app.Environment.IsDevelopment()) {
+	app.MapOpenApi();
+}
 
-		str = String(json_bytes)
-		x2 = Float64(count(c -> c == ':', str)) + 1.0
+app.UseCors();
+app.UseWebSockets();
 
-		return [x1, x2, x3]
-	catch
-		return [100.0, 10.0, 5.0]
-	end
-end
+var activeSockets = new List<WebSocket>();
+var socketLock = new object();
 
-function read_trajectory_from_shm(shm_ptr::Ptr{UInt8}, last_read_pos::UInt64, window_size::Int=200)
-	write_idx = unsafe_load(Ptr{UInt64}(shm_ptr + 8))
+app.Use(async (context, next) => {
+	if (context.Request.Path == "/ws") {
+		if (context.WebSockets.IsWebSocketRequest) {
+			using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+			lock (socketLock) { activeSockets.Add(webSocket); }
 
-	if write_idx < DATA_OFFSET + 512
-		return nothing, write_idx, last_read_pos
-	end
+			app.Logger.LogInformation("[Gateway] New WebSocket client Connected.");
 
-	start_pos = last_read_pos
-	if write_idx > start_pos + 1024 * 1024
-		start_pos = write_idx - 1024 * 1024
-	end
+			var buffer = new byte[1024 * 4];
+			while (webSocket.State == WebSocketState.Open) {
+			var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+			if (result.MessageType == WebSocketMessageType.Close) {
+				await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
+				}
+			}
 
-	if start_pos < DATA_OFFSET
-		start_pos = DATA_OFFSET
-	end
+			lock (socketLock) { activeSockets.Remove(webSocket); }
+			app.Logger.LogInformation("[Gateway] WebSocket client disconnected.");
+		} else {
+			context.Response.StatusCode = StatusCodes.Status400BadRequest;
+		}
+	} else {
+		await next(context);
+	}
+});
 
-	collected_vecs = Vector{Vector{Float64}}()
-	curr_pos = start_pos
+app.MapPost("/api/attractors", async (AttractorDto dto, AppDbContext db) => {
+	var entity = new Attractor {
+		FormulaLatex = dto.FormulaLatex,
+		RSquared = dto.RSquared,
+		IsStable = dto.RSquared >= 0.20f,
+		CreatedAt = DateTime.UtcNow
+	};
 
-	while curr_pos + 4 < write_idx
-		pkt_len = safe_read_uint32(shm_ptr, curr_pos)
+	db.Attractors.Add(entity);
+	await db.SaveChangesAsync();
 
-		if pkt_len > 0 && pkt_len < 65536 && (curr_pos + 4 + pkt_len <= write_idx)
-			bytes = zeros(UInt8, pkt_len)
+	var payload = JsonSerializer.Serialize(new {
+		type = "ATTRACTOR_UPDATED",
+		data = entity
+	});
+	var bytes = Encoding.UTF8.GetBytes(payload);
 
-			for b in 1:pkt_len
-				bytes[b] = safe_read_byte(shm_ptr, curr_pos + 4 + (b - 1))
-			end
+	List<WebSocket> targets;
+	lock (socketLock) { targets = activeSockets.Where(s => s.State == WebSocketState.Open).ToList(); }
 
-			push!(collected_vecs, parse_jetstream_features(bytes))
-			curr_pos += (4 + pkt_len)
-		else
-			curr_pos += 1
-		end
+	foreach (var socket in targets) {
+		await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+	}
 
-		if length(collected_vecs) >= 1000
-			break
-		end
-	end
+	return Results.Created($"/api/attractors/{entity.Id}", entity);
+});
 
-	if length(collected_vecs) < 10
-		return nothing, write_idx, curr_pos
-	end
+app.MapGet("/api/attractors", async (AppDbContext db) => {
+	return await db.Attractors
+		.OrderByDescending(a => a.CreatedAt)
+		.Take(50)
+		.ToListAsync();
+});
 
-	selected = collected_vecs[max(1, end - window_size + 1):end]
-	N = length(selected)
-	X = zeros(Float64, 3, N)
+app.Run();
 
-	for i in 1:N
-		X[:, i] = selected[i]
-	end
-
-	if var(X) < 1e-6
-		return nothing, write_idx, curr_pos
-	end
-
-	return X, write_idx, curr_pos
-end
-
-function calculate_r2(res, X::Matrix{Float64}, dt::Float64)
-	try
-		residuals = try
-			get_residuals(res)
-		catch
-			try
-				res.residuals
-			catch
-				nothing
-			end
-		end
-
-		residuals === nothing && return 0.0
-
-		dX_real = (X[:, 2:end] .-X[:, 1:end-1]) ./ dt
-		ss_tot = Float64(sum((dX_real .- mean(dX_real, dims=2)) .^2))
-
-		ss_res = 0.0
-
-		if residuals isa Number
-			ss_res = Float64(residuals)
-		elseif residuals isa AbstractArray && !isempty(residuals)
-			ss_res = Float64(sum(residuals .^ 2))
-		else 
-			return 0.0
-		end
-		
-		r2 = 1.0 - (ss_res / (ss_tot + 1e-9))
-		return clamp(r2, 0.0, 1.0)
-		
-	catch err
-		println("[Julia Comput] R2 calculation warning: ", err)
-		return 0.0
-	end
-end
-
-function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
-	X_smooth = zeros(size(X)) 
-	N = size(X, 2)
-	half_window = div(window, 2)
-	for i in 1:size(X, 1)
-		for j in 1:N
-			s_idx = max(1, j - half_window)
-			e_idx = min(N, j + half_window)
-			X_smooth[i, j] = mean(X[i, s_idx:e_idx])
-		end
-	end
-	return X_smooth
-end
-
-function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64)
-	X_smoothed = smooth_trajectory(X_raw, 20)
-
-	mu = mean(X_smoothed, dims=2)
-	sigma = std(X_smoothed, dims=2) .+ 1e-9
-	sigma_safe = [s < 1e-6 ? 1.0 : s for s in vec(sigma)]
-	X = (X_smoothed .- mu) ./ sigma_safe
-
-	dX = (X[:, 2:end] .- X[:, 1:end-1]) ./ dt
-	X_prob = X[:, 1:end-1]
-	t_prob = range(0.0, step=dt, length=size(X_prob, 2))
-
-	try
-		prob = ContinuousDataDrivenProblem(X_prob, t_prob, DX = dX)
-
-		@variables x[1:size(X, 1)]
-		poly_vec = polynomial_basis(x, 1)
-		basis = Basis(poly_vec, x)
-
-		opt = STLSQ(0.05)
-		res = solve(prob, basis, opt)
-
-		found_basis = get_basis(res)
-		formula_latex = string(found_basis)
-
-		r_2 = calculate_r2(res, X, dt)
-
-		return formula_latex, r_2, mu, sigma
-	catch err
-		return "dx/dt = 0 (Error: $(err))", 0.0, mu, sigma
-	end
-end
-
-function main()
-	println("=== A P E I R O N // Compute Engine (Julia) ===")
-
-	shm_ptr = attach_shm(SHM_KEY, SHM_SIZE)
-
-	magic = unsafe_load(Ptr{UInt32}(shm_ptr))
-	if magic != SHM_KEY
-		error("[Julia Compute] Invalid Shared Memory Header Magic Byte: ", string(magic, base=16))
-	end
-
-	println("[Julia Compute] System V IPC Direct Ring-Buffer Access Verified (Magic: APEI)")
-
-	last_processed_idx = UInt64(0)
-	read_pos = UInt64(DATA_OFFSET)
-
-	while true
-		X, current_write_idx, next_read_pos = read_trajectory_from_shm(shm_ptr, read_pos, 200)
-		read_pos = next_read_pos
-
-		if X !== nothing && current_write_idx > last_processed_idx
-			last_processed_idx = current_write_idx
-
-			latex_eq, score, mu, sigma = run_sindy_pipeline(X, 0.01)
-			println("\n[SINDy Identified Differential Equation System]")
-			println("  Write Index: ", current_write_idx)
-			println("  Data Mean mu: ", round.(vec(mu), digits=4))
-			println("  Data Std sigma: ", round.(vec(sigma), digits=4))
-			println("  Formula: ", latex_eq)
-			println("  Fit Score (R^2): ", round(score, digits=4))
-		else 
-			if X === nothing
-				println("[Julia Compute] Parsing Bluesky Jetstream JSON from SHM (Write Index: ", current_write_idx, ")...")
-			end
-		end
-
-		sleep(2.0)
-	end
-end
-
-main()
+record AttractorDto(string FormulaLatex, float RSquared);
 </file>
 
 <file path="docs/ARCHITECTURE.md">
@@ -1167,6 +1233,294 @@ erDiagram
         timestamp ingested_at "取り込み日時"
     }
 ```
+</file>
+
+<file path="src/compute-julia/src/main.jl">
+using Pkg
+
+Pkg.activate(@__DIR__)
+
+required_pkgs = ["LinearAlgebra", "Statistics", "DataDrivenDiffEq", "DataDrivenSparse", "ModelingToolkit", "JSON3", "HTTP"]
+
+for pkg in required_pkgs
+	if !haskey(Pkg.project().dependencies, pkg)
+		println("[Julia Setup] Installing missing package: $pkg...")
+		Pkg.add(pkg)
+	end
+end
+
+using LinearAlgebra
+using Statistics
+using DataDrivenDiffEq
+using DataDrivenSparse
+using ModelingToolkit
+using JSON3
+using HTTP
+
+const SHM_KEY = 0x41504549
+const SHM_SIZE = 128 * 1024 * 1024
+const DATA_OFFSET = 64 
+const RING_SIZE = UInt64(SHM_SIZE - DATA_OFFSET)
+const GATEWAY_URL = "http://localhost:5236/api/attractors"
+
+const FLAG_TDA_OFFSET = 32
+const FLAG_SINDY_OFFSET = 36
+
+function attach_shm(key::UInt32 , size::Int)
+	shmid = ccall(:shmget, Cint, (Cint, Csize_t, Cint), key, size, 0)
+	if shmid < 0
+		error("[Julia Compute] Failed to find System V Shared memory. Is Go Ingestion running?")
+	end
+
+	ptr = ccall(:shmat, Ptr{UInt8}, (Cint, Ptr{Cvoid}, Cint), shmid, C_NULL, 0)
+	if Ptr{Cint}(ptr) == Ptr{Cint}(-1)
+		error("[Julia Compute] Failed to attach shared memory segment.")
+	end
+	println("[Julia Compute] Attached Shared Memory ID: ", shmid)
+	return ptr
+end
+
+@inline function safe_read_byte(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
+	rel_pos = abs_pos % RING_SIZE
+	return unsafe_load(shm_ptr + DATA_OFFSET + rel_pos)
+end
+
+@inline function safe_read_uint32(shm_ptr::Ptr{UInt8}, abs_pos::UInt64)
+	b1 = UInt32(safe_read_byte(shm_ptr, abs_pos))
+	b2 = UInt32(safe_read_byte(shm_ptr, abs_pos + 1))
+	b3 = UInt32(safe_read_byte(shm_ptr, abs_pos + 2))
+	b4 = UInt32(safe_read_byte(shm_ptr, abs_pos + 3))
+	return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24)
+end
+
+function check_and_clear_tda_flag(shm_ptr::Ptr{UInt8})
+	flag_ptr = Ptr{UInt32}(shm_ptr + FLAG_TDA_OFFSET)
+	flag_val = unsafe_load(flag_ptr)
+	if flag_val == 1
+		unsafe_store!(flag_ptr, UInt32(0))
+		return true
+	end
+	return false
+end
+	
+function parse_jetstream_features(json_bytes::Vector{UInt8})
+	try
+		x1 = Float64(length(json_bytes))
+		x3 = Float64(sum(Int.(json_bytes[1:min(end, 50)])))
+
+		str = String(json_bytes)
+		x2 = Float64(count(c -> c == ':', str)) + 1.0
+
+		return [x1, x2, x3]
+	catch
+		return [100.0, 10.0, 5.0]
+	end
+end
+
+function read_trajectory_from_shm(shm_ptr::Ptr{UInt8}, last_read_pos::UInt64, window_size::Int=200)
+	write_idx = unsafe_load(Ptr{UInt64}(shm_ptr + 8))
+
+	if write_idx < DATA_OFFSET + 512
+		return nothing, write_idx, last_read_pos
+	end
+
+	start_pos = last_read_pos
+	if write_idx > start_pos + 1024 * 1024
+		start_pos = write_idx - 1024 * 1024
+	end
+
+	if start_pos < DATA_OFFSET
+		start_pos = DATA_OFFSET
+	end
+
+	collected_vecs = Vector{Vector{Float64}}()
+	curr_pos = start_pos
+
+	while curr_pos + 4 < write_idx
+		pkt_len = safe_read_uint32(shm_ptr, curr_pos)
+
+		if pkt_len > 0 && pkt_len < 65536 && (curr_pos + 4 + pkt_len <= write_idx)
+			bytes = zeros(UInt8, pkt_len)
+
+			for b in 1:pkt_len
+				bytes[b] = safe_read_byte(shm_ptr, curr_pos + 4 + (b - 1))
+			end
+
+			push!(collected_vecs, parse_jetstream_features(bytes))
+			curr_pos += (4 + pkt_len)
+		else
+			curr_pos += 1
+		end
+
+		if length(collected_vecs) >= 1000
+			break
+		end
+	end
+
+	if length(collected_vecs) < 10
+		return nothing, write_idx, curr_pos
+	end
+
+	selected = collected_vecs[max(1, end - window_size + 1):end]
+	N = length(selected)
+	X = zeros(Float64, 3, N)
+
+	for i in 1:N
+		X[:, i] = selected[i]
+	end
+
+	if var(X) < 1e-6
+		return nothing, write_idx, curr_pos
+	end
+
+	return X, write_idx, curr_pos
+end
+
+function calculate_r2(res, X::Matrix{Float64}, dt::Float64)
+	try
+		residuals = try
+			get_residuals(res)
+		catch
+			try
+				res.residuals
+			catch
+				nothing
+			end
+		end
+
+		residuals === nothing && return 0.0
+
+		dX_real = (X[:, 2:end] .-X[:, 1:end-1]) ./ dt
+		ss_tot = Float64(sum((dX_real .- mean(dX_real, dims=2)) .^2))
+
+		ss_res = 0.0
+
+		if residuals isa Number
+			ss_res = Float64(residuals)
+		elseif residuals isa AbstractArray && !isempty(residuals)
+			ss_res = Float64(sum(residuals .^ 2))
+		else 
+			return 0.0
+		end
+		
+		r2 = 1.0 - (ss_res / (ss_tot + 1e-9))
+		return clamp(r2, 0.0, 1.0)
+		
+	catch err
+		println("[Julia Comput] R2 calculation warning: ", err)
+		return 0.0
+	end
+end
+
+function smooth_trajectory(X::Matrix{Float64}, window::Int=20)
+	X_smooth = zeros(size(X)) 
+	N = size(X, 2)
+	half_window = div(window, 2)
+	for i in 1:size(X, 1)
+		for j in 1:N
+			s_idx = max(1, j - half_window)
+			e_idx = min(N, j + half_window)
+			X_smooth[i, j] = mean(X[i, s_idx:e_idx])
+		end
+	end
+	return X_smooth
+end
+
+function post_attractor_to_gateway(latex_eq::String, score::Float64)
+	try
+		payload = JSON3.write(Dict("FormulaLatex" => latex_eq, "RSquared" => Float32(score)))
+		resp = HTTP.post(GATEWAY_URL, ["Content-Type" => "application/json"], payload)
+		if resp.status == 201 || resp.status == 200
+			println("[Julia Compute] Successfully posted attractor formula to Gateway.")
+		end
+	catch err
+		println("[Julia Compute] Gateway post skipped or failed (Gateway running?): ", err)
+	end
+end
+
+function run_sindy_pipeline(X_raw::Matrix{Float64}, dt::Float64; is_disrupted::Bool=false)
+	smooth_win = is_disrupted ? 10 : 20
+	X_smoothed = smooth_trajectory(X_raw, smooth_win)
+
+	mu = mean(X_smoothed, dims=2)
+	sigma = std(X_smoothed, dims=2) .+ 1e-9
+	sigma_safe = [s < 1e-6 ? 1.0 : s for s in vec(sigma)]
+	X = (X_smoothed .- mu) ./ sigma_safe
+
+	dX = (X[:, 2:end] .- X[:, 1:end-1]) ./ dt
+	X_prob = X[:, 1:end-1]
+	t_prob = range(0.0, step=dt, length=size(X_prob, 2))
+
+	try
+		prob = ContinuousDataDrivenProblem(X_prob, t_prob, DX = dX)
+
+		@variables x[1:size(X, 1)]
+		poly_vec = polynomial_basis(x, 1)
+		basis = Basis(poly_vec, x)
+
+		threshold = is_disrupted ? 0.02 : 0.05
+		opt = STLSQ(threshold)
+		res = solve(prob, basis, opt)
+
+		found_basis = get_basis(res)
+		formula_latex = string(found_basis)
+
+		r_2 = calculate_r2(res, X, dt)
+
+		return formula_latex, r_2, mu, sigma
+	catch err
+		return "dx/dt = 0 (Error: $(err))", 0.0, mu, sigma
+	end
+end
+
+function main()
+	println("=== A P E I R O N // Compute Engine (Julia) ===")
+
+	shm_ptr = attach_shm(SHM_KEY, SHM_SIZE)
+
+	magic = unsafe_load(Ptr{UInt32}(shm_ptr))
+	if magic != SHM_KEY
+		error("[Julia Compute] Invalid Shared Memory Header Magic Byte: ", string(magic, base=16))
+	end
+
+	println("[Julia Compute] System V IPC Direct Ring-Buffer Access Verified (Magic: APEI)")
+
+	last_processed_idx = UInt64(0)
+	read_pos = UInt64(DATA_OFFSET)
+
+	while true
+		tda_disrupted = check_and_clear_tda_flag(shm_ptr)
+		X, current_write_idx, next_read_pos = read_trajectory_from_shm(shm_ptr, read_pos, 200)
+		read_pos = next_read_pos
+
+		if X !== nothing && current_write_idx > last_processed_idx
+			last_processed_idx = current_write_idx
+
+			if tda_disrupted
+				println("\n[Julia Compute] META-REWRITE TRIGGERED BY R (TDA DISRUPTION DETECTED!)")
+			end
+
+			latex_eq, score, mu, sigma = run_sindy_pipeline(X, 0.01, is_disrupted=tda_disrupted)
+			println("\n[SINDy Identified Differential Equation System]")
+			println("  Write Index: ", current_write_idx)
+			println("  Mode: ",tda_disrupted ? "RE-SINDY (META-REWRITE)" : "STANDARD")
+			println("  Data Mean mu: ", round.(vec(mu), digits=4))
+			println("  Data Std sigma: ", round.(vec(sigma), digits=4))
+			println("  Formula: ", latex_eq)
+			println("  Fit Score (R^2): ", round(score, digits=4))
+
+			post_attractor_to_gateway(latex_eq, score)
+		else 
+			if X === nothing
+				println("[Julia Compute] Parsing Bluesky Jetstream JSON from SHM (Write Index: ", current_write_idx, ")...")
+			end
+		end
+
+		sleep(2.0)
+	end
+end
+
+main()
 </file>
 
 </files>
